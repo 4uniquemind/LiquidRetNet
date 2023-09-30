@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 
-# Liquid Time Layer Module
 class LiquidTimeLayer(nn.Module):
     def __init__(self, input_dim, hidden_dim, tau=1., dt=0.1):
         super().__init__()
@@ -9,33 +8,37 @@ class LiquidTimeLayer(nn.Module):
         self.hidden_dim = hidden_dim
         self.tau = tau
         self.dt = dt
-        self.linear = nn.Linear(input_dim + hidden_dim, hidden_dim)
+        self.linear1 = nn.Linear(input_dim + hidden_dim, hidden_dim)
+        self.linear2 = nn.Linear(hidden_dim, hidden_dim)
+        self.layer_norm = nn.LayerNorm(hidden_dim)
 
     def forward(self, x, h):
         dxdt = (x - h) / self.tau
         h = h + self.dt * dxdt
-        h = self.linear(torch.cat([h, x], dim=-1))
+        res = self.linear1(torch.cat([h, x], dim=-1))
+        h = self.linear2(self.layer_norm(res) + h)
         return h
 
-# RetNet Module with added Time Component
 class RetNet_with_time(nn.Module):
-  def __init__(self, input_dim, hidden_dim, output_dim, tau=1., dt=0.1):
+  def __init__(self, input_dim, hidden_dim, output_dim, num_layers=1, tau=1., dt=0.1):
     super().__init__()
-    self.liquid_layer = LiquidTimeLayer(input_dim= input_dim + 1, hidden_dim=hidden_dim, tau=tau, dt=dt)
+    self.liquid_layers = nn.ModuleList([LiquidTimeLayer(input_dim=input_dim if i==0 else hidden_dim, hidden_dim=hidden_dim, tau=tau, dt=dt) for i in range(num_layers)])
+    self.attention = nn.MultiheadAttention(hidden_dim, num_heads=1)
     self.linear = nn.Linear(hidden_dim, output_dim)
   
-  def forward(self, inputs, time_stamp):
-    inputs = torch.cat([inputs, time_stamp.unsqueeze(-1)], dim=-1)
-    h = torch.zeros(inputs.size(0), self.hidden_dim)
-    for t in range(inputs.size(1)):
-        h = self.liquid_layer(inputs[:, t, :], h)
-    out = self.linear(h)
+  def forward(self, seq, time_stamp):
+    h = torch.zeros(seq.size(0), seq.size(1), self.liquid_layers[0].hidden_dim)
+    for liquid_layer in self.liquid_layers:
+        h = liquid_layer(seq, h)
+
+    attn_output, _ = self.attention(h, h, h)
+    out = self.linear(attn_output[-1])
     return out
 
-inputs = torch.randn(100, 32, 64)  # [seq_len, batch_size, input_size]
-time = torch.arange(100).unsqueeze(1).repeat(1,32).float()  # [seq_len]
+seq = torch.randn(100, 32, 64)
+time = torch.arange(100).unsqueeze(1).repeat(1,32).float()
 
-model = RetNet_with_time(input_dim=64, hidden_dim=50, output_dim=10)
-out = model(inputs, time)
+model = RetNet_with_time(input_dim=64, hidden_dim=50, output_dim=10, num_layers=2)
+out = model(seq, time)
 
 print(out.shape)
