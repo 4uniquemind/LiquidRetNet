@@ -20,30 +20,43 @@ class LiquidTimeLayer(nn.Module):
         h = self.linear2(self.layer_norm(res) + h)
         return h
 
-# RetNet_with_time class
-class RetNet_with_time(nn.Module):
+# RetNet class
+class RetNet(nn.Module):
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.attention = nn.MultiheadAttention(hidden_dim, num_heads=1)
+
+    def forward(self, h):
+        attn_output, _ = self.attention(h, h, h)
+        return attn_output
+
+# Combined LiquidRetNet class
+class LiquidRetNet(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers=1, tau=1., dt=0.1):
         super().__init__()
         self.liquid_layers = nn.ModuleList([LiquidTimeLayer(input_dim=input_dim if i==0 else hidden_dim, hidden_dim=hidden_dim, tau=tau, dt=dt) for i in range(num_layers)])
-        self.attention = nn.MultiheadAttention(hidden_dim, num_heads=1)
+        self.ret_net = RetNet(hidden_dim)
         self.linear = nn.Linear(hidden_dim, output_dim)
         self.dropout = nn.Dropout(p=0.5)
   
     def forward(self, seq, time_stamp):
-        h = torch.zeros(seq.size(0), seq.size(1), self.liquid_layers[0].hidden_dim)
+        h = torch.zeros(seq.size(0), seq.size(1), self.liquid_layers[0].hidden_dim).to(seq.device)
         for liquid_layer in self.liquid_layers:
             h = liquid_layer(seq, h)
 
-        attn_output, _ = self.attention(h, h, h)
+        attn_output = self.ret_net(h)
         out = self.dropout(self.linear(attn_output[-1]))
         return out
 
+# Initialize model
+model = LiquidRetNet(input_dim=64, hidden_dim=50, output_dim=10, num_layers=2)
+
 # Training data
-seq = torch.randn(100, 32, 64)
-time = torch.arange(100).unsqueeze(1).repeat(1,32).float()
+seq = torch.randn(100, 32, 64).cuda()
+time = torch.arange(100).unsqueeze(1).repeat(1,32).float().cuda()
 
 # Model
-model = RetNet_with_time(input_dim=64, hidden_dim=50, output_dim=10, num_layers=2)
+model = model.cuda()
 
 # Loss function
 criterion = nn.CrossEntropyLoss()
@@ -56,12 +69,11 @@ epochs = 50
 for epoch in range(epochs):
     optimizer.zero_grad()
     output = model(seq, time)
-    loss = criterion(output, torch.randint(0, 10, (32,)))
+    loss = criterion(output, torch.randint(0, 10, (32,)).cuda())
     loss.backward()
     optimizer.step()
     if epoch % 10 == 0:
         print(f'Epoch: {epoch+1}, Loss: {loss.item()}')
-
 
 # Save model 
 torch.save(model.state_dict(), "./model.pth")
