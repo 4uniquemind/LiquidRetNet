@@ -1,90 +1,83 @@
 import torch
 import torch.nn as nn
-from torchdiffeq import odeint
 import torch.optim as optim
+from torchdiffeq import odeint
+from torch.utils.data import DataLoader
+from torch.nn.utils.rnn import pad_packed_sequence, pack_padded_sequence, pad_sequence
+import os
 
-class RetainModule(nn.Module):
-    def __init__(self, hidden_dim, decay):
-        super().__init__()
-        self.h_linear = nn.Linear(hidden_dim, hidden_dim)
-        self.seq_linear = nn.Linear(hidden_dim, hidden_dim)
-        self.decay = decay
-        self.norm = nn.LayerNorm(hidden_dim)
+# Your defined RetainModule, LiquidODENet, and LiquidRetNet classes go here
 
-    def forward(self, h, seq):
-        seq = self.seq_linear(seq)
-        h = self.h_linear(h)
-        h = self.norm(h * self.decay + seq)
-        return h
+# Functions for packing and unpacking sequences with variable lengths
+def pack_sequence(inputs, lengths, batch_first=True):
+    return pack_padded_sequence(inputs, lengths, batch_first)
 
-class LiquidODENet(nn.Module):
-    def __init__(self, hidden_dim, tau, A):
-        super().__init__()
-        self.linear = nn.Linear(hidden_dim, hidden_dim)
-        self.tau = tau
-        self.A = A
-        self.norm = nn.LayerNorm(hidden_dim)
+def unpack_sequence(packed_inputs, batch_first=True):
+    return pad_packed_sequence(packed_inputs, batch_first)
 
-    def forward(self, t, h):
-        f = torch.tanh(self.linear(h))
-        dhdt = self.norm(-h/self.tau + f*(self.A - h))
-        return dhdt
+# Function for saving model
+def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
+    torch.save(state, filename)
+    if is_best:
+        shutil.copyfile(filename, 'model_best.pth.tar')
 
-class PositionalEncoding(nn.Module):
-    def __init__(self, hidden_dim, dropout=0.1, max_len=5000):
-        super(PositionalEncoding, self).__init__()
-        self.dropout = nn.Dropout(p=dropout)
+# DataLoader collate_fn
+def collate_fn(batch):
+    inputs, labels = zip(*batch)
+    lengths = torch.tensor([len(seq) for seq in inputs])
+    lengths, idx = lengths.sort(0, descending=True)
+    inputs = [inputs[i] for i in idx]
+    labels = [labels[i] for i in idx]
 
-        pe = torch.zeros(max_len, hidden_dim)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, hidden_dim, 2).float() * (-torch.log(torch.tensor(10000.0)) / hidden_dim))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0).transpose(0, 1)
-        self.register_buffer('pe', pe)
+    inputs = pad_sequence(inputs, batch_first=True)
+    labels = pad_sequence(labels, batch_first=True)
 
-    def forward(self, x):
-        x = x + self.pe[:x.size(0), :]
-        return self.dropout(x)
-
-class LiquidRetNet(nn.Module):
-    def __init__(self, input_dim, hidden_dim, num_layers, num_heads, tau, A, decay):
-        super(LiquidRetNet, self).__init__()
-
-        self.linear = nn.Linear(input_dim, hidden_dim)
-        self.pe = PositionalEncoding(hidden_dim)
-        self.retain = nn.ModuleList([RetainModule(hidden_dim, decay) for _ in range(num_layers)])
-        self.ode = LiquidODENet(hidden_dim, tau, A)
-        self.norm = nn.LayerNorm(hidden_dim)
-        self.attn = nn.MultiheadAttention(hidden_dim, num_heads)
-        self.dropout = nn.Dropout(0.1)
-        self.decoder = nn.Linear(hidden_dim, input_dim)
-
-    def forward(self, x):
-        x = self.pe(self.linear(x))
+    return pack_sequence(inputs, lengths, batch_first=True), labels
+    
+# Training and validation function
+def train_validate(model, train_loader, val_loader, optimizer, loss_fn, num_epochs):
+    for epoch in range(num_epochs):
+        model.train()  # set to training mode
+        epoch_loss = 0
+        for packed_inputs, labels in train_loader:
+            outputs = model(packed_inputs)
+            loss = loss_fn(outputs, labels)
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1)
+            optimizer.step()
+            epoch_loss += loss.item()
+            
+        avg_loss = epoch_loss / len(train_loader)
+        print(f'Epoch: {epoch + 1}, Loss: {avg_loss:.4f}')
         
-        for retain in self.retain:
-            x = retain(x, x)
-        
-        t = torch.linspace(0, 1, steps=x.size(0))
-        x = odeint(self.ode, x, t)[-1, :, :]
+        # validate
+        model.eval()
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for packed_inputs, labels in val_loader:
+                outputs = model(packed_inputs)
+                _, predicted = outputs.max(1)
+                total += labels.size(0)
+                correct += predicted.eq(labels).sum().item()
+        print(f'Validation accuracy: {correct / total * 100 :.2f}%')
 
-        x = self.norm(x)
-        x, _ = self.attn(x, x, x)
-        x = self.dropout(x)
-        x = x + x
-        x = self.decoder(x)
+        # save model
+        save_dict = {
+            'epoch': epoch + 1,
+            'state_dict': model.state_dict(),
+            'optimizer' : optimizer.state_dict(),
+        }
+        save_checkpoint(save_dict, False, filename=os.path.join("checkpoint.pth.tar"))
 
-        return x
 
 model = LiquidRetNet(input_dim=10, hidden_dim=20, num_layers=3, num_heads=2, tau=10, A=0.5, decay=0.9)
 
-input = torch.randn(10, 32, 10)
-output = model(input)
+dataloader = DataLoader(dataset, batch_size=32, collate_fn=collate_fn)
+dataloader_val = DataLoader(dataset_val, batch_size=32, collate_fn=collate_fn)
 
 loss_fn = nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-loss = loss_fn(output, torch.zeros(10, 32, 10))
-loss.backward()
-optimizer.step()
+train_validate(model, dataloader, dataloader_val, optimizer, loss_fn, num_epochs = 10)
