@@ -1,0 +1,41 @@
+import torch
+import torch.nn as nn
+
+# Liquid Time Layer Module
+class LiquidTimeLayer(nn.Module):
+    def __init__(self, input_dim, hidden_dim, tau=1., dt=0.1):
+        super().__init__()
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.tau = tau
+        self.dt = dt
+        self.linear = nn.Linear(input_dim + hidden_dim, hidden_dim)
+
+    def forward(self, x, h):
+        dxdt = (x - h) / self.tau
+        h = h + self.dt * dxdt
+        h = self.linear(torch.cat([h, x], dim=-1))
+        return h
+
+# RetNet Module with added Time Component
+class RetNet_with_time(nn.Module):
+  def __init__(self, input_dim, hidden_dim, output_dim, tau=1., dt=0.1):
+    super().__init__()
+    self.liquid_layer = LiquidTimeLayer(input_dim= input_dim + 1, hidden_dim=hidden_dim, tau=tau, dt=dt)
+    self.linear = nn.Linear(hidden_dim, output_dim)
+  
+  def forward(self, inputs, time_stamp):
+    inputs = torch.cat([inputs, time_stamp.unsqueeze(-1)], dim=-1)
+    h = torch.zeros(inputs.size(0), self.hidden_dim)
+    for t in range(inputs.size(1)):
+        h = self.liquid_layer(inputs[:, t, :], h)
+    out = self.linear(h)
+    return out
+
+inputs = torch.randn(100, 32, 64)  # [seq_len, batch_size, input_size]
+time = torch.arange(100).unsqueeze(1).repeat(1,32).float()  # [seq_len]
+
+model = RetNet_with_time(input_dim=64, hidden_dim=50, output_dim=10)
+out = model(inputs, time)
+
+print(out.shape)
