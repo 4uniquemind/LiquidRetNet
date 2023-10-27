@@ -1,0 +1,47 @@
+import torch
+import torch.nn as nn
+from torchdiffeq import odeint
+
+from xpos_relative_position import XPOS 
+
+class RetentionModule(nn.Module):
+    def __init__(self, hidden_size, gamma):
+        super().__init__()
+        
+        self.retention = SimpleRetention(hidden_size, gamma)
+        
+    def forward(self, h, seq):
+        h = self.retention(h)
+        return h
+
+class ODEFunc(nn.Module):
+  # Как в оригинальной модели  
+
+class LiquidRetNet(nn.Module):
+    def __init__(self, hidden_size, num_layers):
+        super().__init__()
+        
+        self.pe = PosEncoding(hidden_size)
+        
+        self.retention_modules = nn.ModuleList([
+            RetentionModule(hidden_size, gamma) for gamma in gammas
+        ])
+        
+        self.ode = ODEFunc(hidden_size)
+        
+        self.norm = nn.LayerNorm(hidden_size) 
+        self.linear = nn.Linear(hidden_size, hidden_size)
+
+    def forward(self, x):
+      
+        x = self.pe(x)
+        
+        for module in self.retention_modules:
+            x = module(x, x)
+            
+        x = odeint(self.ode, x, torch.tensor([0, 1]))[-1]  
+        
+        x = self.norm(x)
+        x = self.linear(x)
+        
+        return x
